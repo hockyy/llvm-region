@@ -1,0 +1,6 @@
+/* Markdown **bold** in slide content */
+.slidev-slide-content strong,
+.slidev-slide-content b {
+  color: #8b0000;
+  font-weight: 700;
+}
