@@ -4,3 +4,19 @@
   color: #8b0000;
   font-weight: 700;
 }
+
+/* Allow selected code blocks to soft-wrap long lines. */
+.code-wrap pre.shiki code {
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere;
+}
+
+/* Force visible vertical scrolling for long fenced blocks. */
+.code-scroll .slidev-code {
+  overflow-y: auto !important;
+}
+
+.code-scroll .slidev-code-wrapper {
+  overflow-y: auto !important;
+  scrollbar-width: thin;
+}

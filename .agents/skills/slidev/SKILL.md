@@ -187,3 +187,13 @@ Presenter notes go here
 - Documentation: https://sli.dev
 - Theme Gallery: https://sli.dev/resources/theme-gallery
 - Showcases: https://sli.dev/resources/showcases
+
+## Local LLVM/MLIR Debugging Notes
+
+When preparing LLVM/MLIR slides in this repo, you can validate examples directly against a local build:
+
+- `mlir-opt` binary: `/home/hocky/llvm/llvm-project/build_clion/bin/mlir-opt`
+- LLVM source tree: `/home/hocky/llvm/llvm-project`
+- Search for APIs/snippets with `rg` in the source tree (e.g. `rg "WhileOp::getSuccessorRegions"`).
+- Prefer snippet extraction from real sources when possible; keep slide snippets short and annotate expected return values in bullets.
+- For verifier-style examples, use test-like comments (`// RUN:` and `expected-error`) so slides mirror real MLIR tests.

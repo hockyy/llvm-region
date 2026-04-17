@@ -41,7 +41,14 @@ duration: 35min
     <carbon:logo-github />
   </a>
 </div>
+---
+layout: section
+---
 
+# LLVM and MLIR in General
+## Because why not.
+
+---
 ---
 
 ## Prerequisites
@@ -115,6 +122,8 @@ Full header: `~/llvm/llvm-project/llvm/include/llvm/ADT/APInt.h`.
 
 ---
 
+## ADT: `SmallVector` — what `<T, N>` allocates
+
 Full file: `~/llvm/llvm-project/llvm/include/llvm/ADT/SmallVector.h`.
 
 <<< @/snippets/llvm/ADT/SmallVector-inline.h cpp {lines:true}{maxHeight:'160px'}
@@ -142,14 +151,62 @@ $$
 So if you do not pick `N` yourself, LLVM chooses a default `N` from the type size and that ~64-byte target.
 
 ---
+layout: two-cols-header
+
+---
+## ADT: `SmallVector` — default `N` when you write `SmallVector<T>`
+
+::left::
 
 $$
 N_{\text{default}}
 = \max\!\left(1,\ \left\lfloor \frac{K - H}{s} \right\rfloor\right)
 $$
 
-- If $s$ is big, the inner fraction can become $0$ - that is why the code wraps it in $\max(..., 1)$.
-- If $s$ is *DAMN* big, you can hit the **`static_assert`** in `CalculateSmallVectorDefaultInlinedElements`, and then you must choose **`SmallVector<T, N>`** explicitly.
+<div class="m-5 rounded border border-gray-400/40 p-3 text-sm">
+  <div class="mb-2 font-semibold">Memory picture (example: K=64, H=24, s=8)</div>
+  <div class="mb-2 h-6 flex rounded overflow-hidden border border-gray-400/40">
+    <div class="h-full bg-blue-500/70 text-white px-2 flex items-center" style="width:37.5%">Header H = 24B</div>
+    <div class="h-full bg-emerald-500/70 text-white" style="width:62.5%">
+      <div class="h-full w-full flex text-[10px]">
+        <div class="h-full flex-1 border-l border-white/40 flex items-center justify-center">slot 1</div>
+        <div class="h-full flex-1 border-l border-white/40 flex items-center justify-center">slot 2</div>
+        <div class="h-full flex-1 border-l border-white/40 flex items-center justify-center">slot 3</div>
+        <div class="h-full flex-1 border-l border-white/40 flex items-center justify-center">slot 4</div>
+        <div class="h-full flex-1 border-l border-white/40 flex items-center justify-center">slot 5</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+$\left\lfloor \frac{K-H}{s} \right\rfloor = \left\lfloor \frac{40}{8} \right\rfloor = 5,\quad N_{\text{default}} = 5$
+
+If $s$ is big, the inner fraction can become $0$ - that is why the code wraps it in $\max(..., 1)$.
+
+If $s$ is really big, you can hit the **`static_assert`** in `CalculateSmallVectorDefaultInlinedElements`.
+
+::right::
+
+Then you must choose **`SmallVector<T, N>`** explicitly (pick `N` yourself).
+
+```c++
+struct MamaMia {
+  DAMN BIG THINGS
+}
+```
+
+When you're doing: `SmallVector<MamaMia>` you can get this static assert:
+```c++
+  static_assert(
+      sizeof(T) <= 256, "You are trying to use
+      a default number of inlined elements for "...
+```
+
+on which you need to do `SmallVector<MamaMia, 2>;`
+
+---
+
+## ADT: `SmallVector` 
 
 **Example (LP64-ish, rounded for the slide):** take $K=64$, $H=24$, $s=8$ (for example, pointer-sized `T`).
 
@@ -171,33 +228,49 @@ With the same $K,H$ but $s=4$, you get $\lfloor 40/4 \rfloor = 10$ inline elemen
 
 LLVM's **`EquivalenceClasses`** in `llvm/ADT/EquivalenceClasses.h` is a **Tarjan-style union-find**. Use it for **unification**, **value numbering**, and similar problems.
 
+Quick example:
+- Start with `{a} {b} {c} {d}`
+- Learn constraints: `a == c`, `b == d`, then `c == d`
+- Final classes become `{a, b, c, d}` (all merged into one agreement set)
+
 <<< @/snippets/llvm/ADT/EquivalenceClasses-overview.h cpp {lines:true}{maxHeight:'100px'}
 
-For MLIR/SSA work, think **"merge nodes that must agree"**, not just "store stuff in a `std::set`."
+----
+
+## ADT: equivalence classes
+
+```cpp {maxHeight:'170px'}
+llvm::EquivalenceClasses<int> EC;
+EC.insert(1);
+EC.insert(2);
+EC.insert(3);
+
+EC.unionSets(1, 2); // {1,2}
+EC.unionSets(2, 3); // {1,2,3}
+
+bool same = EC.isEquivalent(1, 3); // true
+auto leader = EC.findLeader(1);    // representative iterator
+```
+
+Basically Simple UFDS....
 
 ---
 
-## MLIR: `Type`
+## MLIR: `Type` and `Value`
 
 A **`Type`** is MLIR's compile-time type object: it describes what a **`Value`** can represent (shapes, element types, dialect-specific attributes, etc.).
 
 - Types are **interned**, so identity comparison is the usual MLIR pattern.
 - Dialects can extend the type system, but the same `Type` layer is shared across dialects.
 
----
-
-## MLIR: `Value`
-
 A **`Value`** is an SSA value: either an operation **result** or a **block argument** (including region entry arguments).
 
 - **SSA**: each value has one definition, and use-def chains are explicit.
-- Types travel with values: each `Value` has a queryable `Type`.
-
-`RegionBranchOpInterface` eventually talks about **what values flow across region edges** - `Value` is the thing that flows.
+- Types travel with values: each `Value` has a queryable `Type`. You can do `value.getType()`
 
 ---
 
-## MLIR: `Operation` and `Operation*`
+## MLIR: `Operation` and `Operation*` a.k.a `op`, `ops`.
 
 An **`Operation`** is the core IR unit: **operands**, **results**, **attributes**, **regions**, and **nested blocks** all live there.
 
@@ -218,3 +291,577 @@ So: **`Type`** = what it is, **`Value`** = SSA data, **`Operation*`** = where st
 | MLIR `Type` / `Value` / `Operation*` | Follow operands, results, and regions while reading or debugging IR |
 
 From here, region branch interfaces build directly on **regions + terminators + values crossing edges** - this is the foundation.
+---
+layout: section
+---
+
+# Control Flow
+## So many bugs... 🐛
+
+---
+---
+
+## `ControlFlowInterfaces.cpp` — what is it? 🤔
+
+`mlir/lib/Interfaces/ControlFlowInterfaces.cpp` is the runtime/utility implementation behind MLIR control-flow interfaces.
+
+It is where interface contracts become **real checks and rewrite helpers**:
+
+- `BranchOpInterface` / `WeightedBranchOpInterface`
+- `RegionBranchOpInterface` / `RegionBranchTerminatorOpInterface`
+- Canonicalization + inlining patterns driven by region branch semantics
+
+If `RegionBranchOpInterface` is the "what", this file is the "how it is verified and exploited".
+
+---
+
+## `ControlFlowInterfaces.cpp` — big buckets
+
+1. **Verification** --- This part verifies the validity of the IR 👓
+   - Branch successor operand counts/types
+   - Branch/region weights validation
+   - Region edge operand/input compatibility
+2. **Region graph analysis** --- Bugs are usually here 🐛
+   - Reachability, loops, and mutual exclusivity queries
+3. **Dataflow mapping** --- It can get complicated because multi-edges 💯
+   - Successor operand <-> successor input mappings
+4. **Canonicalization patterns** --- If it fails, usually will trigger verification error
+   - Make dead, remove dead, and deduplicate successor inputs
+5. **Inlining helper pattern** --- Depends on Region graph analysis and Interface methods
+   - Inline region-branch ops with one acyclic path
+
+---
+layout: two-cols
+layoutClass: gap-8
+---
+
+## Regions in common SCF ops
+
+A **region** is a nested CFG attached to an operation.  
+Different ops own different numbers of regions:
+
+- `func.func` -> **1 region** (function body region)
+- `scf.if` -> **2 regions** (`then`, `else`; else may be empty)
+- `scf.for` -> **1 region** (loop body)
+- `scf.while`-- this one is funny, I had trouble handling this before, I feel Ingu had similar case too -> **2 regions** (`before` condition region, `after` loop-body region)
+- `scf.execute_region` -> **1 region** (single nested executable region)
+
+::right::
+
+```mlir
+func.func @demo(%cond: i1, %x: i32, %y: i32, %lb: index, %ub: index, %step: index, %init: i32) -> i32 { // 1 region: function body
+%r = scf.if %cond -> (i32) {      // 2 regions: then/else
+  scf.yield %x : i32
+} else {
+  scf.yield %y : i32
+}
+
+scf.for %i = %lb to %ub step %step { // 1 region: body
+  scf.yield
+}
+
+%out = scf.while (%v = %init) : (i32) -> i32 { // 2 regions: before/after
+^bb0(%arg: i32):
+  scf.condition(%cond) %arg : i32
+} do {
+^bb1(%arg2: i32):
+  scf.yield %arg2 : i32
+}
+  func.return %out : i32
+}
+```
+
+This region count is exactly what `ControlFlowInterfaces.cpp` reasons about when it walks region successors.
+
+
+---
+layout: two-cols-header
+---
+
+Think of verification as a **socket compatibility check** on every edge.
+
+::left::
+
+```mermaid
+flowchart TB
+  P(["parent branch point<br/>(1) scf.if"])
+
+  subgraph T["then region"]
+    TY["scf.yield %x : i32<br/>(2)"]
+  end
+
+  subgraph E["else region"]
+    EY["scf.yield %y : i32<br/>(3)"]
+  end
+
+  P -- cond=true --> TY
+  P -- cond=false --> EY
+  TY -- yielded value --> P
+  EY -- yielded value --> P
+```
+
+::right::
+
+<div class="code-wrap m-3">
+
+```mlir
+%c = arith.constant true
+%x = arith.constant 1 : i32
+%y = arith.constant 2 : i32
+
+%r = scf.if %c -> (i32) {// (1) branch op produces i32
+  scf.yield %x : i32     // (2) then edge forwards
+                         //     i32 to parent result
+} else {
+  scf.yield %y : i32     // (3) else edge forwards
+                         //     i32 to parent result
+}
+```
+</div>
+
+---
+layout: two-cols
+layoutClass: gap-8
+---
+
+
+::left::
+
+```cpp
+scf::IfOp ifOp = ...; // RegionBranchOpInterface op
+
+SmallVector<RegionSuccessor> succs;
+ifOp.getSuccessorRegions(/*point=*/std::nullopt, succs); // parent -> then/else
+
+for (RegionSuccessor &succ : succs) {
+  // If succ points to parent results, successor inputs are the "socket" being checked.
+  // If succ points to a region, the matching edge values come from branch terminators
+  // (for scf.if, the two scf.yield operands: (2) and (3)).
+  OperandRange inputs = succ.getSuccessorInputs();
+  (void)inputs;
+}
+```
+
+Example of how it being used:
+
+```c++
+if (!regionOp)
+  return std::nullopt;
+// Add the control flow predecessor operands to the work list.
+RegionSuccessor region = RegionSuccessor::parent();
+SmallVector<Value> predecessorOperands;
+```
+
+::right::
+
+```cpp
+class RegionSuccessor {
+public:
+  /// Initialize a successor that branches to a region of the parent operation.
+  RegionSuccessor(Region *region) : successor(region) {
+    assert(region && "Region must not be null");
+  }
+  /// ...
+  /// Initialize a successor that branches after/out of the parent operation.
+  static RegionSuccessor parent() { return RegionSuccessor(); }
+
+  // ...
+
+  /// Return true if the successor is the parent operation.
+  bool isParent() const { return successor == nullptr; }
+
+private:
+  /// Private constructor to encourage the use of `RegionSuccessor::parent`.
+  RegionSuccessor() : successor(nullptr) {}
+  Region *successor = nullptr;
+};
+```
+
+---
+layout: two-cols
+---
+
+`RegionBranchOpInterface` quick map:
+
+- `getSuccessorRegions(point, succs)`: from a branch point (parent or region), list next `RegionSuccessor`s.
+- `getEntrySuccessorRegions(operands, succs)`: constant-aware entry successor query from parent operands.
+- `getRegions() / getOperation()->getRegions()`: regions owned by the op (its control-flow graph nodes).
+- parent op results + region block arguments are the "edge sockets" that `RegionSuccessor::getSuccessorInputs()` must match.
+
+`scf.while` example:
+
+```mlir {maxHeight:'170px'}
+%r = scf.while (%v = %init) : (i32) -> i32 {
+^bb0(%arg0: i32):
+  %cond = arith.cmpi slt, %arg0, %limit : i32
+  scf.condition(%cond) %arg0 : i32
+} do {
+^bb1(%arg1: i32):
+  %next = arith.addi %arg1, %step : i32
+  scf.yield %next : i32
+}
+```
+
+For this `whileOp`, returns are:
+
+- `whileOp.getRegions()` -> `[beforeRegion, afterRegion]`
+- `whileOp.getSuccessorRegions(parent(), succs)` -> `[beforeRegion]`
+- `whileOp.getEntrySuccessorRegions(constOperands, succs)` -> `[beforeRegion]` (default dispatches to parent successor query)
+- `whileOp.getSuccessorRegions(point=terminator in beforeRegion, succs)` -> `[parent(), afterRegion]`
+- `whileOp.getSuccessorRegions(point=terminator in afterRegion, succs)` -> `[beforeRegion]`
+
+And successor inputs ("edge sockets"):
+
+- `whileOp.getSuccessorInputs(parent())` -> op results (`%r`)
+- `whileOp.getSuccessorInputs(beforeRegion)` -> `before` block args (`%arg0`)
+- `whileOp.getSuccessorInputs(afterRegion)` -> `after` block args (`%arg1`)
+
+::right:: 
+
+```cpp {maxHeight:'160px'}
+Operation *terminator = ...; // e.g., scf.yield inside then/else
+auto termIface = dyn_cast<RegionBranchTerminatorOpInterface>(terminator);
+if (!termIface)
+  return;
+SmallVector<RegionSuccessor> termSuccs;
+termIface.getMutableSuccessorOperands(termSuccs);
+for (RegionSuccessor &succ : termSuccs) {
+  // These operands are the outgoing edge payload.
+  // For scf.if, this is where (2) and (3) come from.
+  OperandRange edgeValues = succ.getSuccessorInputs();
+  (void)edgeValues;
+}
+```
+
+Verifier asks, edge-by-edge:
+
+1. **Count check**: do both sides have the same number of values?
+2. **Type check**: does position `i` have compatible types on both sides?
+3. **Weight check** (if present): does weight count match successors/regions, and are they not all zero?
+
+Here, **weight** means branch-likelihood metadata (relative probabilities), e.g. `[90, 10]` means "first successor is much more likely than second". Verifier checks the list shape and rejects degenerate all-zero weights.
+
+---
+
+## Verification helpers and failure modes
+
+Core entry points in this file:
+
+```cpp
+detail::verifyBranchSuccessorOperands(...)
+detail::verifyBranchWeights(...)
+detail::verifyRegionBranchWeights(...)
+detail::verifyRegionBranchOpInterface(...)
+```
+
+Fast fail intuition:
+
+- edge carries `(%0 : i32, %1 : f32)` and destination expects `(%arg0 : i32)` -> arity error
+- edge carries `(%0 : i32)` and destination expects `(%arg0 : i64)` -> type error
+
+Custom op test-style MLIR example (`my.region_if` implements `RegionBranchOpInterface`):
+---
+layout: two-cols
+layoutClass: gap-8
+---
+
+```mlir
+// RUN: mlir-opt %s -split-input-file -verify-diagnostics
+
+// --- PASS: one yielded i32 matches one op result i32 ---
+%ok = my.region_if %cond -> (i32) {
+  %x = arith.constant 1 : i32
+  my.yield %x : i32
+} else {
+  %y = arith.constant 2 : i32
+  my.yield %y : i32
+}
+
+```
+
+<br>
+
+```mlir
+// --- FAIL #1: arity mismatch 
+%bad_arity = my.region_if %cond -> (i32) {
+  %a = arith.constant 1 : i32
+  %b = arith.constant 0.5 : f32
+  my.yield %a, %b : i32, f32
+} else {
+  %z = arith.constant 3 : i32
+  my.yield %z : i32
+}
+```
+
+::right::
+
+```mlir
+// --- FAIL #2: type mismatch
+%bad_type = my.region_if %cond -> (i64) {
+  %a = arith.constant 1 : i32
+  my.yield %a : i32
+} else {
+  %b = arith.constant 2 : i32
+  my.yield %b : i32
+}
+```
+
+
+Without this layer, region dataflow rewrites are unsound because edges could carry ill-typed/ill-shaped payloads. Well, this runs at verifier step. There's this funny flag `--mlir-very-unsafe-disable-verifier-on-parsing` you can use to debug.
+
+---
+
+## 2) Region graph algorithms (control-flow reasoning)
+
+`traverseRegionGraph(...)` is the reusable workhorse: it explores successor regions via `getSuccessorRegions`.
+
+Annotated MLIR loop-ish shape:
+
+```mlir
+%i = scf.while (%arg0 = %init) : (i32) -> i32 {
+^bb0(%v: i32):
+  %cond = arith.cmpi slt, %v, %limit : i32
+  scf.condition(%cond) %v : i32      // (1) before -> after OR parent
+} do {
+^bb1(%w: i32):
+  %next = arith.addi %w, %step : i32
+  scf.yield %next : i32              // (2) after -> before
+}
+```
+
+```mermaid
+flowchart LR
+  P([parent]) --> B([before region])
+  B -- cond=true --> A([after region])
+  B -- cond=false --> P
+  A -- yield --> B
+```
+
+Built on top of it:
+
+- `isRegionReachable(begin, r)` - "can I branch from begin to r?"
+- `insideMutuallyExclusiveRegions(a, b)` - finds a shared enclosing `RegionBranchOpInterface` and checks non-reachability both ways
+- `RegionBranchOpInterface::isRepetitiveRegion(index)` - detects self-reachability (looping region)
+- `RegionBranchOpInterface::hasLoop()` - checks whether any entry region traversal revisits a region
+
+This is why analyses can ask high-level questions like "may these two ops execute together?" without dialect-specific logic.
+
+---
+
+## 3) Operand/input mapping utilities (dataflow plumbing)
+
+Important API implemented in this file:
+
+```cpp {maxHeight:'190px'}
+RegionBranchOpInterface::getSuccessorOperandInputMapping(...)
+RegionBranchOpInterface::getSuccessorInputOperandMapping(...)
+RegionBranchOpInterface::getAllRegionBranchPoints()
+RegionBranchOpInterface::getSuccessorOperands(src, dst)
+RegionBranchOpInterface::getNonSuccessorInputs(successor)
+```
+
+Mental model:
+
+- **Successor operands** = values forwarded *along an edge*.
+- **Successor inputs** = destination values that receive those forwarded values
+  (block args or op results).
+- Mapping is built from all branch points (parent + region terminators).
+
+Annotated MLIR mapping example:
+
+```mlir {maxHeight:'170px'}
+%r = scf.if %c -> (i32) {
+  %a = arith.addi %x, %x : i32
+  scf.yield %a : i32            // (1) operand on then->parent edge
+} else {
+  %b = arith.addi %y, %y : i32
+  scf.yield %b : i32            // (2) operand on else->parent edge
+}
+// (3) parent successor input/result is %r : i32
+```
+
+```mermaid
+flowchart LR
+  T([then yield %a]) --> R([parent input/result %r])
+  E([else yield %b]) --> R
+```
+
+Most later rewrite patterns depend on this mapping.
+
+---
+
+## 4) Canonicalization patterns in this file
+
+Three patterns are registered by `populateRegionBranchOpInterfaceCanonicalizationPatterns(...)`:
+
+1. `MakeRegionBranchOpSuccessorInputsDead`
+   - Replaces a successor input with a unique reachable non-input value when dominance allows.
+2. `RemoveDuplicateSuccessorInputUses`
+   - Computes operand signatures and canonicalizes duplicate successor inputs.
+3. `RemoveDeadRegionBranchOpSuccessorInputs`
+   - Removes dead tied successor-input sets + corresponding operands, args, and results.
+
+Key helper concepts:
+
+- reachable values tracing (`computeReachableValuesFromSuccessorInput`)
+- dominance/scope guard (`isDefinedBefore`)
+- tied input sets via `llvm::EquivalenceClasses`
+
+Annotated simplification example:
+
+```mlir {maxHeight:'180px'}
+%r0, %r1 = scf.for %iv = %lb to %ub step %st iter_args(%a = %x, %b = %x)
+          -> (i32, i32) {
+  scf.yield %a, %a : i32, i32    // (1) duplicate flow into both outputs
+}
+use(%r0, %r1)                    // (2) canonicalizer can fold %r1 -> %r0
+```
+
+```mermaid
+flowchart LR
+  X([%x]) --> A([iter arg %a])
+  X --> B([iter arg %b])
+  A --> R0([%r0])
+  A --> R1([%r1 duplicate])
+  R1 -. replace uses .-> R0
+```
+
+---
+
+## 5) Inlining support (`InlineRegionBranchOp`)
+
+This pattern inlines when there is **exactly one acyclic path** through the region branch op.
+
+Path is discovered with constant-aware successor resolution:
+
+- extract constant attrs from operands
+- query `getEntrySuccessorRegions` / terminator `getSuccessorRegions`
+- reject multi-successor, cycles, multi-block unsupported cases
+
+Then it:
+
+- computes replacements for successor inputs (and non-successor inputs via callback),
+- inlines blocks along the path,
+- replaces the original op at the final parent successor.
+
+Registered through `populateRegionBranchOpInterfaceInliningPattern(...)`.
+
+Annotated one-path inlining idea:
+
+```mlir {maxHeight:'180px'}
+%r = scf.for %iv = %c5 to %c6 step %c1 iter_args(%arg = %0) -> (i32) {
+  %n = arith.addi %arg, %iv : i32
+  scf.yield %n : i32              // (1) single acyclic path parent->region->parent
+}
+use(%r)                           // (2) can become use(%n') after inlining
+```
+
+```mermaid
+flowchart LR
+  P([parent]) --> R([single region block])
+  R --> P2([parent successor])
+  P2 -. replace op .-> INL([inlined ops in parent block])
+```
+
+---
+
+## How to read `ControlFlowInterfaces.cpp` efficiently
+
+If you are reading for:
+
+- **Verifier/debug errors** -> start at `verifyRegionBranchOpInterface`.
+- **"Why did this branch op fold/canonicalize?"** -> read the 3 rewrite structs.
+- **Loop/reachability behavior** -> read `traverseRegionGraph`, then `hasLoop` and `insideMutuallyExclusiveRegions`.
+- **Inlining behavior** -> read `computeSingleAcyclicRegionBranchPath` and `InlineRegionBranchOp`.
+
+This file is the bridge between interface declarations and real optimization/legalization behavior.
+
+---
+
+## `ControlFlowInterfaces.cpp` in one sentence
+
+`mlir/lib/Interfaces/ControlFlowInterfaces.cpp` turns region-branch interface contracts into:
+
+- verifier checks (edge arity + type compatibility),
+- graph queries (reachability, loops, mutual exclusion),
+- and canonicalization/inlining patterns.
+
+---
+
+## MLIR example with regions (`scf.if`)
+
+```mlir {maxHeight:'260px'}
+%c = arith.constant true
+%x = arith.constant 10 : i32
+%y = arith.constant 20 : i32
+
+%r = scf.if %c -> (i32) {
+  %a = arith.addi %x, %x : i32
+  scf.yield %a : i32
+} else {
+  %b = arith.addi %y, %y : i32
+  scf.yield %b : i32
+}
+
+%z = arith.addi %r, %x : i32
+```
+
+<div class="relative mx-auto mt-2 h-34 w-220 text-sm">
+  <div class="absolute left-8 top-12 rounded border border-main/30 px-2 py-1">
+    parent: <code>scf.if</code>
+  </div>
+  <div class="absolute left-80 top-2 rounded border border-main/30 px-2 py-1">
+    then region
+  </div>
+  <div class="absolute left-80 top-24 rounded border border-main/30 px-2 py-1">
+    else region
+  </div>
+  <div class="absolute left-150 top-12 rounded border border-main/30 px-2 py-1">
+    result: <code>%r</code>
+  </div>
+
+  <Arrow x1="135" y1="62" x2="340" y2="24" color="#60a5fa" />
+  <Arrow x1="135" y1="62" x2="340" y2="112" color="#f59e0b" />
+  <Arrow x1="410" y1="24" x2="278" y2="62" color="#34d399" />
+  <Arrow x1="410" y1="112" x2="278" y2="62" color="#34d399" />
+</div>
+
+How this maps to region-branch concepts:
+
+- branch point `parent` chooses either `then` region or `else` region
+- each region terminator (`scf.yield`) branches back to `parent`
+- `%r` is the parent successor input/result receiving yielded values
+
+---
+
+## Branching as a region graph (Mermaid)
+
+```mermaid
+flowchart LR
+  P([Parent / op entry])
+  T([Then region])
+  E([Else region])
+  O([Parent successor: op result %r])
+
+  P -- cond=true --> T
+  P -- cond=false --> E
+  T -- scf.yield %a --> O
+  E -- scf.yield %b --> O
+```
+
+`ControlFlowInterfaces.cpp` verifies those edges by checking:
+
+- same number of successor operands and successor inputs
+- type compatibility on each edge position
+
+---
+
+## Why this matters for canonicalization
+
+Given the graph/dataflow above, the patterns in `ControlFlowInterfaces.cpp` can:
+
+- replace successor inputs with unique reachable values when safe,
+- remove dead/tied successor inputs and matching operands/results,
+- deduplicate successor input uses with equivalent predecessor signatures.
+
+That is why region branch ops (for/if/while-like) can simplify aggressively while staying structurally correct.
