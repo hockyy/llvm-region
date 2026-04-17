@@ -295,7 +295,7 @@ From here, region branch interfaces build directly on **regions + terminators + 
 layout: section
 ---
 
-# Control Flow
+# Control Flow Interfaces
 ## So many bugs... 🐛
 
 ---
@@ -310,8 +310,6 @@ It is where interface contracts become **real checks and rewrite helpers**:
 - `BranchOpInterface` / `WeightedBranchOpInterface`
 - `RegionBranchOpInterface` / `RegionBranchTerminatorOpInterface`
 - Canonicalization + inlining patterns driven by region branch semantics
-
-If `RegionBranchOpInterface` is the "what", this file is the "how it is verified and exploited".
 
 ---
 
@@ -481,21 +479,32 @@ private:
 layout: two-cols
 ---
 
+::left::
+
 `RegionBranchOpInterface` quick map:
 
-- `getSuccessorRegions(point, succs)`: from a branch point (parent or region), list next `RegionSuccessor`s.
-- `getEntrySuccessorRegions(operands, succs)`: constant-aware entry successor query from parent operands.
+- `getSuccessorRegions(point, succs)`: from a branch point (parent or terminator), list next `RegionSuccessor`s.
+- `getEntrySuccessorRegions(operands, succs)`: constant-aware entry successor query (`ArrayRef<Attribute>`; null attr = non-constant operand).
 - `getRegions() / getOperation()->getRegions()`: regions owned by the op (its control-flow graph nodes).
 - parent op results + region block arguments are the "edge sockets" that `RegionSuccessor::getSuccessorInputs()` must match.
+
+::right:: 
+
+---
+layout: two-cols
+layoutClass: gap-8
+---
 
 `scf.while` example:
 
 ```mlir {maxHeight:'170px'}
 %r = scf.while (%v = %init) : (i32) -> i32 {
+// ----> Before region
 ^bb0(%arg0: i32):
   %cond = arith.cmpi slt, %arg0, %limit : i32
   scf.condition(%cond) %arg0 : i32
 } do {
+// ----> After region
 ^bb1(%arg1: i32):
   %next = arith.addi %arg1, %step : i32
   scf.yield %next : i32
@@ -506,32 +515,213 @@ For this `whileOp`, returns are:
 
 - `whileOp.getRegions()` -> `[beforeRegion, afterRegion]`
 - `whileOp.getSuccessorRegions(parent(), succs)` -> `[beforeRegion]`
-- `whileOp.getEntrySuccessorRegions(constOperands, succs)` -> `[beforeRegion]` (default dispatches to parent successor query)
-- `whileOp.getSuccessorRegions(point=terminator in beforeRegion, succs)` -> `[parent(), afterRegion]`
-- `whileOp.getSuccessorRegions(point=terminator in afterRegion, succs)` -> `[beforeRegion]`
 
-And successor inputs ("edge sockets"):
+::right::
 
-- `whileOp.getSuccessorInputs(parent())` -> op results (`%r`)
-- `whileOp.getSuccessorInputs(beforeRegion)` -> `before` block args (`%arg0`)
-- `whileOp.getSuccessorInputs(afterRegion)` -> `after` block args (`%arg1`)
+- `whileOp.getEntrySuccessorRegions(operands, succs)` -> `[beforeRegion]` (`operands` is `ArrayRef<Attribute>` constants; default dispatches to parent successor query)
+- `whileOp.getSuccessorRegions(beforeRegion, succs)` -> `[parent(), afterRegion]`
+- `whileOp.getSuccessorRegions(afterRegion, succs)` -> `[beforeRegion]`
+- `succ.getSuccessorInputs()` for successor=`parent()` -> values mapped to op results (`%r`)
+- `succ.getSuccessorInputs()` for successor=`beforeRegion` -> values mapped to `before` block args (`%arg0`)
+- `succ.getSuccessorInputs()` for successor=`afterRegion` -> values mapped to `after` block args (`%arg1`)
 
-::right:: 
 
-```cpp {maxHeight:'160px'}
-Operation *terminator = ...; // e.g., scf.yield inside then/else
-auto termIface = dyn_cast<RegionBranchTerminatorOpInterface>(terminator);
-if (!termIface)
-  return;
-SmallVector<RegionSuccessor> termSuccs;
-termIface.getMutableSuccessorOperands(termSuccs);
-for (RegionSuccessor &succ : termSuccs) {
-  // These operands are the outgoing edge payload.
-  // For scf.if, this is where (2) and (3) come from.
-  OperandRange edgeValues = succ.getSuccessorInputs();
-  (void)edgeValues;
+---
+---
+
+## Black-box method guide (`scf.while`)
+
+```mlir
+%r = scf.while (%v = %init) : (f32) -> i64 {
+^bb0(%arg0: f32):
+  %shared = call @shared_compute(%arg0) : (f32) -> i64
+  %cond = call @evaluate_condition(%arg0, %shared) : (f32, i64) -> i1
+  scf.condition(%cond) %shared : i64
+} do {
+^bb1(%arg1: i64):
+  %next = call @payload(%arg1) : (i64) -> f32
+  scf.yield %next : f32
 }
 ```
+
+Legend:
+- `beforeRegion.getBlocks().front() = ^bb0`
+- `afterRegion.getBlocks().front() = ^bb1`
+- op result socket: `%r`
+- region input sockets: `%arg0 : f32`, `%arg1 : i64`
+
+
+---
+---
+
+```cpp
+scf::WhileOp whileOp = ...;
+
+// MutableArrayRef<Region> getRegions()
+// return: [beforeRegion, afterRegion]
+whileOp.getRegions();
+
+// void getEntrySuccessorRegions(ArrayRef<Attribute> operands,
+//                               SmallVectorImpl<RegionSuccessor> &regions)
+// return (via out param): [beforeRegion]
+whileOp.getEntrySuccessorRegions(operands, succs);
+
+// void getSuccessorRegions(RegionBranchPoint point,
+//                          SmallVectorImpl<RegionSuccessor> &regions)
+// return (via out param): [beforeRegion]
+whileOp.getSuccessorRegions(RegionBranchPoint::parent(), succs);
+// return (via out param): [parent(), afterRegion]
+whileOp.getSuccessorRegions(beforeRegion, succs);
+// return (via out param): [beforeRegion]
+whileOp.getSuccessorRegions(afterRegion, succs);
+```
+
+1. **Input**: what object/query goes in?
+2. **Output**: what regions/values are produced?
+3. **Reason**: how does verifier/dataflow use it?
+
+---
+---
+
+```cpp
+// OperandRange getEntrySuccessorOperands(RegionSuccessor successor)
+// return: getInits() (entry-edge payload)
+whileOp.getEntrySuccessorOperands(successor);
+
+// ValueRange getSuccessorInputs(RegionSuccessor successor)
+// return:
+//   successor=parent()     -> op results (%r)
+//   successor=beforeRegion -> block args (%arg0)
+//   successor=afterRegion  -> block args (%arg1)
+whileOp.getSuccessorInputs(successor);
+```
+
+1. **Input**: what object/query goes in?
+2. **Output**: what regions/values are produced?
+3. **Reason**: how does verifier/dataflow use it?
+
+---
+
+## `getRegions` + entry successor methods
+
+- `whileOp.getRegions()`
+  - **Input**: none
+  - **Output**: regions owned by op, in order
+  - **Returns**: `[beforeRegion, afterRegion]`
+- `whileOp.getSuccessorRegions(RegionBranchPoint::parent(), succs)`
+  - **Input**: parent entry branch point
+  - **Output**: fills `succs`
+  - **Returns**: `[beforeRegion]`
+- `whileOp.getEntrySuccessorRegions(operands, succs)`
+  - **Input**: `operands : ArrayRef<Attribute>` (**not** `ValueRange`; this is a constant-projection of runtime operands, null attr = non-constant)
+  - **Output**: fills `succs`, optionally pruned by constants
+  - **Returns**: `[beforeRegion]` for `scf.while`
+
+---
+
+## Real constant-projection example (LLVM source)
+
+`scf::IfOp::getEntrySuccessorRegions` in `mlir/lib/Dialect/SCF/IR/SCF.cpp`:
+
+```cpp
+void IfOp::getEntrySuccessorRegions(ArrayRef<Attribute> operands,
+                                    SmallVectorImpl<RegionSuccessor> &regions) {
+  FoldAdaptor adaptor(operands, *this);
+  auto boolAttr = dyn_cast_or_null<BoolAttr>(adaptor.getCondition());
+  if (!boolAttr || boolAttr.getValue())
+    regions.emplace_back(&getThenRegion());
+  if (!boolAttr || !boolAttr.getValue()) {
+    if (!getElseRegion().empty())
+      regions.emplace_back(&getElseRegion());
+    else
+      regions.emplace_back(RegionSuccessor::parent());
+  }
+}
+```
+
+What this means:
+- input is `ArrayRef<Attribute>` (`operands`), not `ValueRange`
+- if condition is unknown (`nullptr`) -> keep both possible entry successors
+- if condition is known -> keep only reachable successor(s)
+
+---
+
+## Constant projection: concrete `scf.if` outcomes
+
+```mlir
+%r = scf.if %cond -> i32 {
+  %a = arith.constant 1 : i32
+  scf.yield %a : i32
+} else {
+  %b = arith.constant 2 : i32
+  scf.yield %b : i32
+}
+```
+
+`getEntrySuccessorRegions(operands, succs)` returns:
+- if projection says `%cond = true`  -> `succs = [thenRegion]`
+- if projection says `%cond = false` -> `succs = [elseRegion]`
+- if projection says `%cond = null`  -> `succs = [thenRegion, elseRegion]`
+
+This is the "real" purpose: path pruning for analyses when constants are known.
+
+Here it's `BoolAttr`, btw.
+
+---
+
+## `getSuccessorRegions(region, ...)`
+
+```cpp
+SmallVector<RegionSuccessor> succs;
+whileOp.getSuccessorRegions(beforeRegion, succs);
+// expected: [parent(), afterRegion]
+
+succs.clear();
+whileOp.getSuccessorRegions(afterRegion, succs);
+// expected: [beforeRegion]
+```
+
+Input:
+- source region (`beforeRegion` or `afterRegion`)
+Output:
+- all possible `RegionSuccessor`s from terminators in that region
+Black box:
+- from `beforeRegion`: exit the op or enter `afterRegion`
+- from `afterRegion`: loop back to `beforeRegion`
+
+---
+layout: two-cols-header
+layoutCols: gap-8
+---
+
+## `getEntrySuccessorOperands` vs `getSuccessorInputs`
+<br>
+::left::
+- `whileOp.getEntrySuccessorOperands(successor)`
+  - **Input**: destination successor on a parent-entry edge
+  - **Output**: edge payload values that parent forwards
+  - **Returns**: `getInits()` for `scf.while`
+  - **Black box**: "Which values travel on the edge?"
+::right::
+- `whileOp.getSuccessorInputs(successor)`
+  - **Input**: destination `RegionSuccessor`
+  - **Output**: destination sockets that receive payload
+  - **Returns for `scf.while`**:
+    - successor=`parent()` -> op results (`%r`)
+    - successor=`beforeRegion` -> block args (`%arg0`)
+    - successor=`afterRegion` -> block args (`%arg1`)
+  - **Black box**: "Where must payload land and type-match?"
+
+---
+layout: section
+---
+
+# CF Verifications
+## Huft.. 🙂
+
+---
+
+## Verification helpers and failure modes
 
 Verifier asks, edge-by-edge:
 
@@ -540,11 +730,9 @@ Verifier asks, edge-by-edge:
 3. **Weight check** (if present): does weight count match successors/regions, and are they not all zero?
 
 Here, **weight** means branch-likelihood metadata (relative probabilities), e.g. `[90, 10]` means "first successor is much more likely than second". Verifier checks the list shape and rejects degenerate all-zero weights.
-
 ---
 
 ## Verification helpers and failure modes
-
 Core entry points in this file:
 
 ```cpp
@@ -610,8 +798,12 @@ layoutClass: gap-8
 Without this layer, region dataflow rewrites are unsound because edges could carry ill-typed/ill-shaped payloads. Well, this runs at verifier step. There's this funny flag `--mlir-very-unsafe-disable-verifier-on-parsing` you can use to debug.
 
 ---
+layout: two-cols-header
+layoutClass: gap-8
+---
 
 ## 2) Region graph algorithms (control-flow reasoning)
+::left::
 
 `traverseRegionGraph(...)` is the reusable workhorse: it explores successor regions via `getSuccessorRegions`.
 
@@ -628,7 +820,6 @@ Annotated MLIR loop-ish shape:
   scf.yield %next : i32              // (2) after -> before
 }
 ```
-
 ```mermaid
 flowchart LR
   P([parent]) --> B([before region])
@@ -637,14 +828,12 @@ flowchart LR
   A -- yield --> B
 ```
 
-Built on top of it:
+::right::
 
 - `isRegionReachable(begin, r)` - "can I branch from begin to r?"
 - `insideMutuallyExclusiveRegions(a, b)` - finds a shared enclosing `RegionBranchOpInterface` and checks non-reachability both ways
-- `RegionBranchOpInterface::isRepetitiveRegion(index)` - detects self-reachability (looping region)
+- `RegionBranchOpInterface::` `isRepetitiveRegion(index)` - detects self-reachability (looping region)
 - `RegionBranchOpInterface::hasLoop()` - checks whether any entry region traversal revisits a region
-
-This is why analyses can ask high-level questions like "may these two ops execute together?" without dialect-specific logic.
 
 ---
 
@@ -775,84 +964,6 @@ If you are reading for:
 - **Inlining behavior** -> read `computeSingleAcyclicRegionBranchPath` and `InlineRegionBranchOp`.
 
 This file is the bridge between interface declarations and real optimization/legalization behavior.
-
----
-
-## `ControlFlowInterfaces.cpp` in one sentence
-
-`mlir/lib/Interfaces/ControlFlowInterfaces.cpp` turns region-branch interface contracts into:
-
-- verifier checks (edge arity + type compatibility),
-- graph queries (reachability, loops, mutual exclusion),
-- and canonicalization/inlining patterns.
-
----
-
-## MLIR example with regions (`scf.if`)
-
-```mlir {maxHeight:'260px'}
-%c = arith.constant true
-%x = arith.constant 10 : i32
-%y = arith.constant 20 : i32
-
-%r = scf.if %c -> (i32) {
-  %a = arith.addi %x, %x : i32
-  scf.yield %a : i32
-} else {
-  %b = arith.addi %y, %y : i32
-  scf.yield %b : i32
-}
-
-%z = arith.addi %r, %x : i32
-```
-
-<div class="relative mx-auto mt-2 h-34 w-220 text-sm">
-  <div class="absolute left-8 top-12 rounded border border-main/30 px-2 py-1">
-    parent: <code>scf.if</code>
-  </div>
-  <div class="absolute left-80 top-2 rounded border border-main/30 px-2 py-1">
-    then region
-  </div>
-  <div class="absolute left-80 top-24 rounded border border-main/30 px-2 py-1">
-    else region
-  </div>
-  <div class="absolute left-150 top-12 rounded border border-main/30 px-2 py-1">
-    result: <code>%r</code>
-  </div>
-
-  <Arrow x1="135" y1="62" x2="340" y2="24" color="#60a5fa" />
-  <Arrow x1="135" y1="62" x2="340" y2="112" color="#f59e0b" />
-  <Arrow x1="410" y1="24" x2="278" y2="62" color="#34d399" />
-  <Arrow x1="410" y1="112" x2="278" y2="62" color="#34d399" />
-</div>
-
-How this maps to region-branch concepts:
-
-- branch point `parent` chooses either `then` region or `else` region
-- each region terminator (`scf.yield`) branches back to `parent`
-- `%r` is the parent successor input/result receiving yielded values
-
----
-
-## Branching as a region graph (Mermaid)
-
-```mermaid
-flowchart LR
-  P([Parent / op entry])
-  T([Then region])
-  E([Else region])
-  O([Parent successor: op result %r])
-
-  P -- cond=true --> T
-  P -- cond=false --> E
-  T -- scf.yield %a --> O
-  E -- scf.yield %b --> O
-```
-
-`ControlFlowInterfaces.cpp` verifies those edges by checking:
-
-- same number of successor operands and successor inputs
-- type compatibility on each edge position
 
 ---
 
