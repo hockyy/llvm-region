@@ -46,12 +46,12 @@ duration: 35min
 
 ## Prerequisites
 
-What you should already be comfortable with before `RegionBranchOpInterface` and region-based control flow in MLIR.
+Stuff you should already be comfortable with before we jump into `RegionBranchOpInterface` and region control flow in MLIR.
 
 <v-clicks>
 
-- **LLVM (the codebase)** — how types and ADTs are used when reading MLIR/LLVM C++ headers
-- **MLIR IR** — `Type`, `Value`, and `Operation` as the objects everything else hangs off
+- **LLVM (the codebase)** — how types and ADTs show up when you read MLIR/LLVM C++ headers
+- **MLIR IR** — `Type`, `Value`, and `Operation`, since everything else hangs off these
 
 </v-clicks>
 
@@ -64,23 +64,39 @@ then MLIR’s IR model (what those APIs are describing).
 
 ## LLVM: `Type`, classes, and ADTs
 
-**Two different “types” in the room**
+**Two different meanings of “type”**
 
-- **C++ `class` / templates** — how LLVM and MLIR *implement* the compiler (`APInt`, `SmallVector<…>`, visitors, etc.).
-- **`llvm::Type` (and friends)** — the LLVM IR notion of a type (integer, pointer, struct, …) used in the classic LLVM representation.
+- **C++ `class` / templates** — how LLVM and MLIR *build* the compiler (`APInt`, `SmallVector<...>`, visitors, etc.).
+- **`llvm::Type` (and friends)** — LLVM IR's idea of a type (integer, pointer, struct, ...) in classic LLVM IR.
 
-When you read `include/llvm/` or `include/mlir/`, you are mostly in the **C++** and **LLVM ADT** world; when you read dialect ops and SSA, you are in the **MLIR IR** world. Both show up on the same line of code.
+When you read `include/llvm/` or `include/mlir/`, you are mostly in **C++ / LLVM ADT** land. When you read dialect ops and SSA, you are in **MLIR IR** land. In practice, both often appear in the same line of code.
 
 ---
 
 ## ADT: `APInt`
 
-**Arbitrary-precision integers** sized to a bit width — LLVM’s workhorse for constants and anything that must match IR integer types exactly.
+**Arbitrary-precision integers** with an explicit bit width - LLVM's go-to integer type for constants and anything that must match IR integer types exactly.
 
-- Holds **width** and **signedness** semantics as the IR expects (not “whatever `int` happens to be”).
-- Used wherever bit-exact integer reasoning matters: widths, masks, alignment in bits, etc.
+- Carries **width** and **signedness** the way IR expects (not "whatever `int` is on this platform").
+- Used whenever exact bit-level behavior matters: widths, masks, alignment in bits, etc.
+- Common helpers you will see: `getBitWidth()`, `isNegative()`, `isZero()`, and value extractors like `getZExtValue()` / `getSExtValue()`.
+---
 
-You do not need to memorize every API; you need to recognize **“this is not `int` / `long` — it’s IR-accurate.”**
+## ADT: `APInt`
+
+- `zext` = **zero-extend** (pad with `0` bits), `sext` = **sign-extend** (copy the sign bit). Same raw bits, different interpretation.
+- Two's complement example:
+  - 8-bit `11111111` to 16-bit 
+  - `zext` is `00000000 11111111` (255);
+  - `sext` is `11111111 11111111` (-1).
+- Declaring one is usually width + value, e.g. `APInt v(8, 255)` means "8-bit value with raw bits `11111111`".
+- For signed meaning, you are still storing raw bits; signedness shows up when you *interpret* or *extract* (`isNegative()`, `getSExtValue()`, `getZExtValue()`).
+
+---
+
+## ADT: `APInt`
+
+You do not need to memorize every API; just recognize **"this is not `int` / `long` - this is IR-accurate."**
 
 Full header: `~/llvm/llvm-project/llvm/include/llvm/ADT/APInt.h`.
 
@@ -90,12 +106,12 @@ Full header: `~/llvm/llvm-project/llvm/include/llvm/ADT/APInt.h`.
 
 ## ADT: `SmallVector` — what `<T, N>` allocates
 
-`SmallVector<T, N>` is **`N` inline elements of `T`**, not `N` bytes.
+`SmallVector<T, N>` means **`N` inline elements of `T`**, not `N` bytes.
 
-- **`SmallVectorStorage<T, N>`** holds a **byte buffer** sized for exactly **`N` objects**: `InlineElts[N * sizeof(T)]`, **`alignas(T)`** so placement-new into that storage is legal.
-- **`N == 0`**: explicit specialization — **no** `InlineElts` array (avoids useless padding); alignment is still correct so **`getFirstEl()`** pointer math stays valid.
-- **`SmallVector<T, N>`** inherits that storage and passes **`N`** into **`SmallVectorImpl<T>(N)`** as the **initial inline capacity** (the “small” buffer the base may point at before `grow()`).
-- Plain version: it tries to keep the first `N` elements inside the object itself (fast, no malloc). If you push past `N`, it spills into a normal growable heap array.
+- **`SmallVectorStorage<T, N>`** keeps a **raw byte buffer** for exactly **`N` objects**: `InlineElts[N * sizeof(T)]`, with **`alignas(T)`** so placement-new is safe.
+- **`N == 0`**: special case - there is **no** `InlineElts` array (saves padding), but alignment still keeps **`getFirstEl()`** math valid.
+- **`SmallVector<T, N>`** inherits that storage and passes **`N`** into **`SmallVectorImpl<T>(N)`** as starting inline capacity.
+- Plain version: first `N` elements stay inside the object (fast, no malloc). Go past `N`, and it spills into a normal growable heap array (LLVM's own grow logic, not `std::vector` internally).
 
 ---
 
@@ -110,26 +126,32 @@ class: text-left
 
 ## ADT: `SmallVector` — default `N` when you write `SmallVector<T>`
 
-If you omit **`N`**, LLVM targets a **~64-byte** `sizeof(SmallVector<T>)` via `kPreferredSmallVectorSizeof = 64`. Let:
+If you leave out **`N`**, LLVM aims for about a **64-byte** `sizeof(SmallVector<T>)` using `kPreferredSmallVectorSizeof = 64`. Let:
 
 - $K = 64$ (bytes)
 - $H = \text{sizeof}(\texttt{SmallVector<T,0>})$ — header-only footprint (no inline `T` objects yet)
 - $s = \text{sizeof}(T)$
 
-Integer division matches LLVM’s `PreferredInlineBytes / sizeof(T)` with a **minimum of one** inline slot:
+This is basically LLVM's `PreferredInlineBytes / sizeof(T)`, with a **minimum of one** inline slot:
 
 $$
 N_{\text{default}}
 = \max\!\left(1,\ \left\lfloor \frac{K - H}{s} \right\rfloor\right)
 $$
 
-So basically, without any specific declaration of inlined elements 
+So if you do not pick `N` yourself, LLVM chooses a default `N` from the type size and that ~64-byte target.
 
 ---
 
-Huge $s$ can make the inner fraction $0$ — that’s why the code uses the $\max$ with $1$. Very large $s$ also trips the **`static_assert`** in `CalculateSmallVectorDefaultInlinedElements`; then you must choose **`SmallVector<T, N>`** explicitly.
+$$
+N_{\text{default}}
+= \max\!\left(1,\ \left\lfloor \frac{K - H}{s} \right\rfloor\right)
+$$
 
-**Example (LP64-style, numbers rounded for the slide):** take $K=64$, $H=24$, $s=8$ (e.g. pointer-sized `T`).
+- If $s$ is big, the inner fraction can become $0$ - that is why the code wraps it in $\max(..., 1)$.
+- If $s$ is *DAMN* big, you can hit the **`static_assert`** in `CalculateSmallVectorDefaultInlinedElements`, and then you must choose **`SmallVector<T, N>`** explicitly.
+
+**Example (LP64-ish, rounded for the slide):** take $K=64$, $H=24$, $s=8$ (for example, pointer-sized `T`).
 
 $$
 \left\lfloor \frac{64 - 24}{8} \right\rfloor = \left\lfloor \frac{40}{8} \right\rfloor = 5
@@ -137,7 +159,7 @@ $$
 N_{\text{default}} = 5
 $$
 
-Same $K,H$ with $s=4$ gives $\lfloor 40/4 \rfloor = 10$ inline elements.
+With the same $K,H$ but $s=4$, you get $\lfloor 40/4 \rfloor = 10$ inline elements.
 
 <<< @/snippets/llvm/ADT/SmallVector-default-N.h cpp {lines:true}{maxHeight:'140px'}
 
@@ -145,54 +167,54 @@ Same $K,H$ with $s=4$ gives $\lfloor 40/4 \rfloor = 10$ inline elements.
 
 ## ADT: equivalence classes
 
-**Partition a set into disjoint groups** — “these things are the same for analysis purposes.”
+**Split things into disjoint groups** - "these belong together for analysis."
 
-LLVM’s **`EquivalenceClasses`** in `llvm/ADT/EquivalenceClasses.h` implements **Tarjan-style union–find**. Use it for **unification**, **value numbering**, etc.
+LLVM's **`EquivalenceClasses`** in `llvm/ADT/EquivalenceClasses.h` is a **Tarjan-style union-find**. Use it for **unification**, **value numbering**, and similar problems.
 
 <<< @/snippets/llvm/ADT/EquivalenceClasses-overview.h cpp {lines:true}{maxHeight:'100px'}
 
-For MLIR/SSA work: think **“merge nodes that must agree”**, not just a `std::set`.
+For MLIR/SSA work, think **"merge nodes that must agree"**, not just "store stuff in a `std::set`."
 
 ---
 
 ## MLIR: `Type`
 
-A **`Type`** is a compile-time entity in MLIR’s type system: it describes what a **`Value`** may represent (shapes, element types, dialect-specific attributes, etc.).
+A **`Type`** is MLIR's compile-time type object: it describes what a **`Value`** can represent (shapes, element types, dialect-specific attributes, etc.).
 
-- Types are **interned** and compared by identity in the usual MLIR style.
-- Dialects extend the type system; the same IR layer (`Type`) spans all dialects.
+- Types are **interned**, so identity comparison is the usual MLIR pattern.
+- Dialects can extend the type system, but the same `Type` layer is shared across dialects.
 
 ---
 
 ## MLIR: `Value`
 
-A **`Value`** is an SSA value: either a **result** of an operation or a **block argument** (including region entry arguments).
+A **`Value`** is an SSA value: either an operation **result** or a **block argument** (including region entry arguments).
 
-- **SSA**: each value has a single definition; use-def chains are explicit.
-- Types flow with values: each `Value` has a `Type` you can query.
+- **SSA**: each value has one definition, and use-def chains are explicit.
+- Types travel with values: each `Value` has a queryable `Type`.
 
-`RegionBranchOpInterface` eventually talks about **what values flow along region edges** — `Value` is that currency.
+`RegionBranchOpInterface` eventually talks about **what values flow across region edges** - `Value` is the thing that flows.
 
 ---
 
 ## MLIR: `Operation` and `Operation*`
 
-An **`Operation`** is the unit of IR: **operands**, **results**, **attributes**, **regions**, and **nested blocks**.
+An **`Operation`** is the core IR unit: **operands**, **results**, **attributes**, **regions**, and **nested blocks** all live there.
 
-- **`Operation*`** is the usual handle when walking or rewriting IR (passes, patterns, interfaces).
-- Regions belong to ops; terminators inside regions connect to **successors** described by interfaces.
+- **`Operation*`** is the normal handle when walking or rewriting IR (passes, patterns, interfaces).
+- Regions belong to ops, and region terminators connect to **successors** described by interfaces.
 
-So: **`Type`** (what), **`Value`** (SSA data), **`Operation*`** (where structure and control flow live).
+So: **`Type`** = what it is, **`Value`** = SSA data, **`Operation*`** = where structure and control flow live.
 
 ---
 
 ## Prerequisites — checklist
 
-| Topic | You should be able to… |
+| Topic | You should be able to... |
 | --- | --- |
-| `APInt` | Say why fixed-width integer semantics live here, not in raw C++ ints |
-| `SmallVector<T,N>` | Explain inline `N` elements (`N*sizeof(T)` bytes), default `N` (~64B object), and when the heap takes over |
-| Equivalence classes | Read “merge these for analysis” as partition / union–find usage |
-| MLIR `Type` / `Value` / `Operation*` | Follow operands, results, and regions when reading or debugging IR |
+| `APInt` | Explain why fixed-width integer semantics live here, not in plain C++ ints |
+| `SmallVector<T,N>` | Explain inline `N` elements (`N*sizeof(T)` bytes), default `N` (~64B object), and when it moves to heap storage |
+| Equivalence classes | Read "merge these for analysis" as partition / union-find usage |
+| MLIR `Type` / `Value` / `Operation*` | Follow operands, results, and regions while reading or debugging IR |
 
-From here, region branch interfaces build on **regions + terminators + values crossing edges** — i.e. on this foundation.
+From here, region branch interfaces build directly on **regions + terminators + values crossing edges** - this is the foundation.
