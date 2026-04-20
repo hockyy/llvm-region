@@ -45,11 +45,17 @@ duration: 35min
 
 # Table of Contents 🗂️
 
-- LLVM and MLIR foundations
-- Control-flow interfaces and region successors
-- Verifier checks and common failure modes
-- Region graph reasoning and mapping utilities
-- Inlining support for region-branch ops
+<Toc minDepth="1" maxDepth="1" />
+
+---
+
+## Learning Outcomes / Motivations🎯
+After this talk, you should be able to:
+
+- explain what `RegionBranchOpInterface` models (nodes, edges, and payload sockets)
+- debug verifier failures by mapping each edge's **operands -> inputs**
+- reason about region reachability/loops in ops like `scf.while`
+- use the core API set in `ControlFlowInterfaces.cpp` without guessing contracts
 
 ---
 layout: section
@@ -428,8 +434,9 @@ flowchart TB
 </div>
 
 ---
-layout: two-cols
-layoutClass: gap-8
+layout: two-cols-header
+layoutClass: gap-2
+class: code-wrap
 ---
 
 ## `RegionSuccessor` API Walkthrough 🧭
@@ -734,6 +741,22 @@ layout: section
 
 # CF Verifications ✅
 ## Huft.. 🙂😮‍💨
+
+---
+
+## Debugging Playbook (5-minute triage) 🧭
+
+When a region-branch op fails verification, check in this order:
+
+1. **Edge shape first**: `getSuccessorRegions(...)` from parent and region terminators.
+2. **Arity next**: compare successor operands count with `getSuccessorInputs(...)`.
+3. **Type match**: check pairwise type compatibility at each index.
+4. **Mapping sanity**: inspect
+   - `getSuccessorOperandInputMapping(...)`
+   - `getSuccessorInputOperandMapping(...)`
+5. **Graph sanity** (if flow feels wrong): `isRegionReachable(...)`, `hasLoop()`, `isRepetitiveRegion(...)`.
+
+If all checks pass but behavior is still odd, print all branch points via `getAllRegionBranchPoints()` and verify each edge payload explicitly.
 
 ---
 
@@ -1182,7 +1205,7 @@ For `scf.while`:
 
 ---
 
-## 5) Inlining support (`InlineRegionBranchOp`) 🚀
+## Inlining support (`InlineRegionBranchOp`) 🚀
 
 This pattern inlines when there is **exactly one acyclic path** through the region branch op.
 
@@ -1205,3 +1228,40 @@ Then it:
 }
 use(%r)                           // (2) can become use(%n') after inlining
 ```
+
+---
+layout: two-cols-header
+layoutClass: gap-8
+---
+
+## Practical Cheat Sheet ✅
+
+::left::
+
+**When reading a region-branch op**
+
+- Start with `getRegions()`
+- Then `getSuccessorRegions(parent, ...)`
+- Then each terminator `getSuccessorRegions(...)`
+
+**When debugging verifier issues**
+
+- `getSuccessorInputs(...)`
+- `getSuccessorOperands(src, dst)`
+- `getPredecessorValues(...)`
+
+::right::
+
+**When analysis needs control-flow facts**
+
+- `isRegionReachable(...)`
+- `insideMutuallyExclusiveRegions(...)`
+- `hasLoop()` / `isRepetitiveRegion(...)`
+- `getRegionInvocationBounds(...)`
+
+**Source hotspots**
+
+- `mlir/lib/Interfaces/ControlFlowInterfaces.cpp`
+- `mlir/lib/Dialect/SCF/IR/SCF.cpp`
+- `mlir/include/mlir/Interfaces/ControlFlowInterfaces.h`
+
